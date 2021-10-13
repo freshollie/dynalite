@@ -129,19 +129,18 @@
     if (errors.misusedFunction) {
       return
     }
-    if (!Array.isArray(args)) {
-      if (args.name == 'size') {
-        errors.misusedFunction = 'The function is not allowed to be used this way in an expression; function: ' +
-          args.name
-      }
-      return
-    }
     for (var i = 0; i < args.length; i++) {
       if (args[i] && args[i].type == 'function' && args[i].name != 'size') {
         errors.misusedFunction = 'The function is not allowed to be used this way in an expression; function: ' +
           args[i].name
         return
       }
+    }
+  }
+
+  function checkMisusedSize(expr) {
+    if (expr.type == 'function' && expr.name == 'size' && !errors.misusedFunction) {
+      errors.misusedFunction = 'The function is not allowed to be used this way in an expression; function: ' + expr.name
     }
   }
 
@@ -220,44 +219,51 @@
   }
 }
 
+// XXX: We should really refactor this to just construct the expression tree first,
+//      and then traverse to check errors afterwards
+
 Start
-  = _ expression:OrConditionExpression _ {
-      return checkErrors() || {expression: expression, nestedPaths: nestedPaths, pathHeads: pathHeads}
+  = _ expr:OrConditionExpression _ {
+      checkMisusedSize(expr)
+      return checkErrors() || {expression: expr, nestedPaths: nestedPaths, pathHeads: pathHeads}
     }
 
 OrConditionExpression
   = x:AndConditionExpression _ token:OrToken _ y:OrConditionExpression {
+      [x, y].forEach(checkMisusedSize)
       return {type: 'or', args: [x, y]}
     }
-  / AndConditionExpression
+  / expr:AndConditionExpression
 
 AndConditionExpression
   = x:NotConditionExpression _ AndToken _ y:AndConditionExpression {
+      [x, y].forEach(checkMisusedSize)
       return {type: 'and', args: [x, y]}
     }
   / NotConditionExpression
 
 NotConditionExpression
   = token:NotToken _ expr:ParensConditionExpression {
+      checkMisusedSize(expr)
       return {type: 'not', args: [expr]}
     }
   / ParensConditionExpression
 
 ParensConditionExpression
-  = '((' _ expr:OrConditionExpression _ '))' {
+  = '(' _ '(' _ expr:OrConditionExpression _ ')' _ ')' {
       redundantParensError()
       return expr
     }
-  / '(' _ expr:OrConditionExpression _ ')' {
-      return expr
-    }
-  / '((' _ expr:ConditionExpression _ '))' {
+  / '(' _ '(' _ expr:ConditionExpression _ ')' _ ')' {
       redundantParensError()
       checkConditionErrors()
       return expr
     }
   / expr:ConditionExpression {
       checkConditionErrors()
+      return expr
+    }
+  / '(' _ expr:OrConditionExpression _ ')' {
       return expr
     }
 
@@ -276,16 +282,13 @@ ConditionExpression
       checkMisusedFunction([x].concat(args))
       return {type: 'in', args: [x].concat(args)}
     }
-  / f:Function {
-      checkMisusedFunction(f)
-      return f
-    }
+  / f:Function
 
 Comparator
   = '>=' / '<=' / '<>' / '=' / '<' / '>'
 
 OperandParens
-  = '((' _ op:Operand _ '))' {
+  = '(' _ '(' _ op:Operand _ ')' _ ')' {
       redundantParensError()
       return op
     }
@@ -297,7 +300,20 @@ OperandParens
 Operand
   = Function
   / ExpressionAttributeValue
-  / PathExpression
+  / path:PathExpression {
+      for (var i = 0; i < path.length; i++) {
+        if (typeof path[i] === 'string') {
+          checkReserved(path[i])
+        } else if (path[i] && path[i].type == 'attrName') {
+          path[i] = resolveAttrName(path[i].name)
+        }
+      }
+      if (path.length > 1) {
+        nestedPaths[path[0]] = true
+      }
+      pathHeads[path[0]] = true
+      return path
+    }
 
 Function
   = !ReservedWord head:IdentifierStart tail:IdentifierPart* _ '(' _ args:FunctionArgumentList _ ')' {
@@ -314,7 +330,7 @@ FunctionArgumentList
 
 ExpressionAttributeName
   = !ReservedWord head:'#' tail:IdentifierPart* {
-      return resolveAttrName(head + tail.join(''))
+      return {type: 'attrName', name: head + tail.join('')}
     }
 
 ExpressionAttributeValue
@@ -331,17 +347,12 @@ PathExpression
         return prop
       }
     )* {
-      var path = (Array.isArray(head) ? head : [head]).concat(tail)
-      if (path.length > 1) {
-        nestedPaths[path[0]] = true
-      }
-      pathHeads[path[0]] = true
-      return path
+      return (Array.isArray(head) ? head : [head]).concat(tail)
     }
 
 GroupedPathExpression
   = Identifier
-  / '((' _ path:PathExpression _ '))' {
+  / '(' _ '(' _ path:PathExpression _ ')' _ ')' {
       redundantParensError()
       return path
     }
@@ -351,9 +362,7 @@ GroupedPathExpression
 
 Identifier
   = !ReservedWord head:IdentifierStart tail:IdentifierPart* {
-      var name = head + tail.join('')
-      checkReserved(name)
-      return name
+      return head + tail.join('')
     }
   / ExpressionAttributeName
 

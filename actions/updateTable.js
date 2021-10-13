@@ -78,6 +78,13 @@ module.exports = function updateTable(store, data, cb) {
       var table = results.table,
           updates, i, update, dataThroughput, tableThroughput, readDiff, writeDiff
 
+      var tableBillingMode = (table.BillingModeSummary || {}).BillingMode || 'PROVISIONED'
+
+      if (data.ProvisionedThroughput && (data.BillingMode || tableBillingMode) == 'PAY_PER_REQUEST') {
+        return callback(db.validationError('One or more parameter values were invalid: ' +
+          'Neither ReadCapacityUnits nor WriteCapacityUnits can be specified when BillingMode is PAY_PER_REQUEST'))
+      }
+
       try {
         updates = getThroughputUpdates(data, table)
       } catch (err) {
@@ -107,6 +114,38 @@ module.exports = function updateTable(store, data, cb) {
 
         update.readDiff = readDiff
         update.writeDiff = writeDiff
+
+        if (data.BillingMode == 'PROVISIONED' && tableBillingMode != 'PROVISIONED') {
+          tableThroughput.ReadCapacityUnits = dataThroughput.ReadCapacityUnits
+          tableThroughput.WriteCapacityUnits = dataThroughput.WriteCapacityUnits
+        }
+      }
+
+      if (data.BillingMode == 'PAY_PER_REQUEST' && tableBillingMode != 'PAY_PER_REQUEST') {
+        table.TableStatus = 'UPDATING'
+        table.BillingModeSummary = table.BillingModeSummary || {}
+        table.BillingModeSummary.BillingMode = 'PAY_PER_REQUEST'
+        table.TableThroughputModeSummary = table.TableThroughputModeSummary || {}
+        table.TableThroughputModeSummary.TableThroughputMode = 'PAY_PER_REQUEST'
+        table.ProvisionedThroughput = table.ProvisionedThroughput || {}
+        table.ProvisionedThroughput.LastDecreaseDateTime = Date.now() / 1000
+        table.ProvisionedThroughput.NumberOfDecreasesToday = table.ProvisionedThroughput.NumberOfDecreasesToday || 0
+        table.ProvisionedThroughput.ReadCapacityUnits = 0
+        table.ProvisionedThroughput.WriteCapacityUnits = 0
+        if (table.GlobalSecondaryIndexes) {
+          table.GlobalSecondaryIndexes.forEach(function(index) {
+            index.IndexStatus = 'UPDATING'
+            index.ProvisionedThroughput = index.ProvisionedThroughput || {}
+            index.ProvisionedThroughput.NumberOfDecreasesToday = index.ProvisionedThroughput.NumberOfDecreasesToday || 0
+            index.ProvisionedThroughput.ReadCapacityUnits = 0
+            index.ProvisionedThroughput.WriteCapacityUnits = 0
+          })
+        }
+      } else if (data.BillingMode == 'PROVISIONED' && tableBillingMode != 'PROVISIONED') {
+        table.BillingModeSummary = table.BillingModeSummary || {}
+        table.BillingModeSummary.BillingMode = 'PROVISIONED'
+        table.TableThroughputModeSummary = table.TableThroughputModeSummary || {}
+        table.TableThroughputModeSummary.TableThroughputMode = 'PROVISIONED'
       }
 
       callback(null, updates)
@@ -141,6 +180,20 @@ module.exports = function updateTable(store, data, cb) {
             tableThroughput.NumberOfDecreasesToday++
           }
 
+          if (data.BillingMode == 'PAY_PER_REQUEST' && tableBillingMode != 'PAY_PER_REQUEST') {
+            table.TableStatus = 'ACTIVE'
+            table.BillingModeSummary.LastUpdateToPayPerRequestDateTime = Date.now() / 1000
+            table.TableThroughputModeSummary.LastUpdateToPayPerRequestDateTime = Date.now() / 1000
+            delete table.ProvisionedThroughput.LastDecreaseDateTime
+            if (table.GlobalSecondaryIndexes) {
+              table.GlobalSecondaryIndexes.forEach(function(index) {
+                index.IndexStatus = 'ACTIVE'
+                index.ProvisionedThroughput.NumberOfDecreasesToday++
+                index.ProvisionedThroughput.LastDecreaseDateTime = Date.now() / 1000
+              })
+            }
+          }
+
           tableThroughput.ReadCapacityUnits = dataThroughput.ReadCapacityUnits
           tableThroughput.WriteCapacityUnits = dataThroughput.WriteCapacityUnits
         })
@@ -167,6 +220,11 @@ module.exports = function updateTable(store, data, cb) {
 }
 
 function getThroughputUpdates(data, table) {
+  var tableBillingMode = (table.BillingModeSummary || {}).BillingMode || 'PROVISIONED'
+  var remainingIndexes = (table.GlobalSecondaryIndexes || []).reduce(function(map, index) {
+    map[index.IndexName] = true
+    return map
+  }, Object.create(null))
   var updates = []
   if (data.ProvisionedThroughput) {
     updates.push({
@@ -187,6 +245,7 @@ function getThroughputUpdates(data, table) {
     }
     (table.GlobalSecondaryIndexes || []).forEach(function(index) {
       if (index.IndexName == update.Update.IndexName) {
+        delete remainingIndexes[index.IndexName]
         updates.push({
           dataThroughput: dataThroughput,
           tableThroughput: index.ProvisionedThroughput,
@@ -195,5 +254,9 @@ function getThroughputUpdates(data, table) {
       }
     })
   })
+  if (data.BillingMode == 'PROVISIONED' && tableBillingMode != 'PROVISIONED' && Object.keys(remainingIndexes).length) {
+    throw db.validationError('One or more parameter values were invalid: ' +
+      'ProvisionedThroughput must be specified for index: ' + Object.keys(remainingIndexes).join(','))
+  }
   return updates
 }

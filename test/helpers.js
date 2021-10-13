@@ -8,6 +8,8 @@ var http = require('http'),
 http.globalAgent.maxSockets = Infinity
 
 exports.MAX_SIZE = 409600
+exports.awsRegion = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1'
+exports.awsAccountId = process.env.AWS_ACCOUNT_ID // will be set programatically below
 exports.version = 'DynamoDB_20120810'
 exports.prefix = '__dynalite_test_'
 exports.request = request
@@ -24,26 +26,22 @@ exports.batchBulkPut = batchBulkPut
 exports.assertSerialization = assertSerialization
 exports.assertType = assertType
 exports.assertValidation = assertValidation
+exports.assertTransactionCanceled = assertTransactionCanceled
 exports.assertNotFound = assertNotFound
 exports.assertInUse = assertInUse
 exports.assertConditional = assertConditional
+exports.assertAccessDenied = assertAccessDenied
 exports.strDecrement = strDecrement
 exports.randomString = randomString
 exports.randomNumber = randomNumber
 exports.randomName = randomName
 exports.readCapacity = 10
 exports.writeCapacity = 5
-exports.testHashTable = randomName()
-exports.testHashNTable = randomName()
-exports.testRangeTable = randomName()
-exports.testRangeNTable = randomName()
-exports.testRangeBTable = randomName()
-// For testing:
-// exports.testHashTable = '__dynalite_test_1'
-// exports.testHashNTable = '__dynalite_test_2'
-// exports.testRangeTable = '__dynalite_test_3'
-// exports.testRangeNTable = '__dynalite_test_4'
-// exports.testRangeBTable = '__dynalite_test_5'
+exports.testHashTable = process.env.REMOTE ? '__dynalite_test_1' : randomName()
+exports.testHashNTable = process.env.REMOTE ? '__dynalite_test_2' : randomName()
+exports.testRangeTable = process.env.REMOTE ? '__dynalite_test_3' : randomName()
+exports.testRangeNTable = process.env.REMOTE ? '__dynalite_test_4' : randomName()
+exports.testRangeBTable = process.env.REMOTE ? '__dynalite_test_5' : randomName()
 
 var port = 10000 + Math.round(Math.random() * 10000),
     requestOpts = process.env.REMOTE ?
@@ -52,17 +50,22 @@ var port = 10000 + Math.round(Math.random() * 10000),
 
 var dynaliteServer = dynalite({path: process.env.DYNALITE_PATH})
 
+var CREATE_REMOTE_TABLES = true
+var DELETE_REMOTE_TABLES = true
+
 before(function(done) {
   this.timeout(200000)
   dynaliteServer.listen(port, function(err) {
     if (err) return done(err)
-    createTestTables(done)
-    // done()
+    createTestTables(function(err) {
+      if (err) return done(err)
+      getAccountId(done)
+    })
   })
 })
 
 after(function(done) {
-  this.timeout(200000)
+  this.timeout(500000)
   deleteTestTables(function(err) {
     if (err) return done(err)
     dynaliteServer.close(done)
@@ -87,10 +90,14 @@ function request(opts, cb) {
   http.request(opts, function(res) {
     res.setEncoding('utf8')
     res.on('error', cb)
-    res.body = ''
-    res.on('data', function(chunk) { res.body += chunk })
+    res.rawBody = ''
+    res.on('data', function(chunk) { res.rawBody += chunk })
     res.on('end', function() {
-      try { res.body = JSON.parse(res.body) } catch (e) {} // eslint-disable-line no-empty
+      try {
+        res.body = JSON.parse(res.rawBody)
+      } catch (e) {
+        res.body = res.rawBody
+      }
       if (process.env.REMOTE && opts.retries <= MAX_RETRIES &&
           (res.body.__type == 'com.amazon.coral.availability#ThrottlingException' ||
           res.body.__type == 'com.amazonaws.dynamodb.v20120810#LimitExceededException')) {
@@ -131,6 +138,7 @@ function randomName() {
 }
 
 function createTestTables(done) {
+  if (process.env.REMOTE && !CREATE_REMOTE_TABLES) return done()
   var readCapacity = exports.readCapacity, writeCapacity = exports.writeCapacity
   var tables = [{
     TableName: exports.testHashTable,
@@ -141,7 +149,7 @@ function createTestTables(done) {
     TableName: exports.testHashNTable,
     AttributeDefinitions: [{AttributeName: 'a', AttributeType: 'N'}],
     KeySchema: [{KeyType: 'HASH', AttributeName: 'a'}],
-    ProvisionedThroughput: {ReadCapacityUnits: readCapacity, WriteCapacityUnits: writeCapacity},
+    BillingMode: 'PAY_PER_REQUEST',
   }, {
     TableName: exports.testRangeTable,
     AttributeDefinitions: [
@@ -186,7 +194,16 @@ function createTestTables(done) {
   async.forEach(tables, createAndWait, done)
 }
 
+function getAccountId(done) {
+  request(opts('DescribeTable', {TableName: exports.testHashTable}), function(err, res) {
+    if (err) return done(err)
+    exports.awsAccountId = res.body.Table.TableArn.split(':')[4]
+    done()
+  })
+}
+
 function deleteTestTables(done) {
+  if (process.env.REMOTE && !DELETE_REMOTE_TABLES) return done()
   request(opts('ListTables', {}), function(err, res) {
     if (err) return done(err)
     var names = res.body.TableNames.filter(function(name) { return name.indexOf(exports.prefix) === 0 })
@@ -217,8 +234,11 @@ function waitUntilActive(name, done) {
   request(opts('DescribeTable', {TableName: name}), function(err, res) {
     if (err) return done(err)
     if (res.statusCode != 200) return done(new Error(res.statusCode + ': ' + JSON.stringify(res.body)))
-    if (res.body.Table.TableStatus == 'ACTIVE')
+    if (res.body.Table.TableStatus == 'ACTIVE' &&
+        (!res.body.Table.GlobalSecondaryIndexes ||
+          res.body.Table.GlobalSecondaryIndexes.every(function(index) { return index.IndexStatus == 'ACTIVE' }))) {
       return done(null, res)
+    }
     setTimeout(waitUntilActive, 1000, name, done)
   })
 }
@@ -357,6 +377,7 @@ function assertType(target, property, type, done) {
     type = subtypeMatch[1]
     subtype = subtypeMatch[2]
   }
+  var castMsg = "class sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to class java.lang.Class (sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl and java.lang.Class are in module java.base of loader 'bootstrap')"
   switch (type) {
     case 'Boolean':
       msgs = [
@@ -426,12 +447,12 @@ function assertType(target, property, type, done) {
       break
     case 'ParameterizedList':
       msgs = [
-        ['23', 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [true, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [23, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [-2147483648, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [2147483648, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [34.56, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
+        ['23', castMsg],
+        [true, castMsg],
+        [23, castMsg],
+        [-2147483648, castMsg],
+        [2147483648, castMsg],
+        [34.56, castMsg],
         [{}, 'Start of structure or map found where not expected'],
       ]
       break
@@ -448,12 +469,12 @@ function assertType(target, property, type, done) {
       break
     case 'ParameterizedMap':
       msgs = [
-        ['23', 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [true, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [23, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [-2147483648, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [2147483648, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
-        [34.56, 'sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl cannot be cast to java.lang.Class'],
+        ['23', castMsg],
+        [true, castMsg],
+        [23, castMsg],
+        [-2147483648, castMsg],
+        [2147483648, castMsg],
+        [34.56, castMsg],
         [[], 'Unrecognized collection type java.util.Map<java.lang.String, com.amazonaws.dynamodb.v20120810.AttributeValue>'],
       ]
       break
@@ -518,10 +539,26 @@ function assertType(target, property, type, done) {
   }, done)
 }
 
-function assertValidation(target, data, msg, done) {
+function assertAccessDenied(target, data, msg, done) {
   request(opts(target, data), function(err, res) {
     if (err) return done(err)
     res.statusCode.should.equal(400)
+    if (typeof res.body !== 'object') {
+      return done(new Error('Not JSON: ' + res.body))
+    }
+    res.body.__type.should.equal('com.amazon.coral.service#AccessDeniedException')
+    if (msg instanceof RegExp) {
+      res.body.Message.should.match(msg)
+    } else {
+      res.body.Message.should.equal(msg)
+    }
+    done()
+  })
+}
+
+function assertValidation(target, data, msg, done) {
+  request(opts(target, data), function(err, res) {
+    if (err) return done(err)
     if (typeof res.body !== 'object') {
       return done(new Error('Not JSON: ' + res.body))
     }
@@ -538,6 +575,24 @@ function assertValidation(target, data, msg, done) {
     } else {
       res.body.message.should.equal(msg)
     }
+    res.statusCode.should.equal(400)
+    done()
+  })
+}
+
+function assertTransactionCanceled(target, data, msg, done) {
+  request(opts(target, data), function(err, res) {
+    if (err) return done(err)
+    if (typeof res.body !== 'object') {
+      return done(new Error('Not JSON: ' + res.body))
+    }
+    res.body.__type.should.equal('com.amazonaws.dynamodb.v20120810#TransactionCanceledException')
+    if (msg instanceof RegExp) {
+      res.body.message.should.match(msg)
+    } else {
+      res.body.message.should.equal(msg)
+    }
+    res.statusCode.should.equal(400)
     done()
   })
 }

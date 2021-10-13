@@ -1,6 +1,7 @@
-var once = require('once')
+var once = require('once'),
+    db = require('../db')
 
-module.exports = function tagResource(store, data, cb) {
+module.exports = function listTagsOfResource(store, data, cb) {
   cb = once(cb)
 
   var tableName = data.ResourceArn.split('/').pop()
@@ -11,10 +12,9 @@ module.exports = function tagResource(store, data, cb) {
     }
     if (err) return cb(err)
 
-    var batchPuts = data.Tags.map(function(tag) { return {type: 'put', key: tag.Key, value: tag.Value} })
-    store.getTagDb(tableName).batch(batchPuts, function(err) {
-      if (err) return cb(err)
-      cb(null, '')
+    db.lazy(store.getTagDb(tableName).createReadStream(), cb).join(function(tags) {
+      cb(null, {Tags: tags.map(function(tag) { return {Key: tag.key, Value: tag.value} })})
     })
   })
 }
+

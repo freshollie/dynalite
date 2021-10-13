@@ -20,6 +20,10 @@ exports.types = {
       },
     },
   },
+  BillingMode: {
+    type: 'String',
+    enum: ['PROVISIONED', 'PAY_PER_REQUEST'],
+  },
   GlobalSecondaryIndexUpdates: {
     type: 'List',
     children: {
@@ -145,10 +149,14 @@ exports.types = {
 }
 
 exports.custom = function(data) {
-
-  if (!data.ProvisionedThroughput && !data.StreamSpecification && !data.UpdateStreamEnabled &&
+  if (!data.ProvisionedThroughput && !data.BillingMode && !data.UpdateStreamEnabled &&
       (!data.GlobalSecondaryIndexUpdates || !data.GlobalSecondaryIndexUpdates.length) && !data.SSESpecification) {
-    return 'At least one of ProvisionedThroughput, BillingMode, UpdateStreamEnabled, GlobalSecondaryIndexUpdates or SSESpecification is required'
+    return 'At least one of ProvisionedThroughput, BillingMode, UpdateStreamEnabled, GlobalSecondaryIndexUpdates, SSESpecification or ReplicaUpdates is required'
+  }
+
+  if (data.BillingMode == 'PROVISIONED' && !data.ProvisionedThroughput) {
+    return 'One or more parameter values were invalid: ' +
+      'ProvisionedThroughput must be specified when BillingMode is PROVISIONED'
   }
 
   if (data.ProvisionedThroughput) {
@@ -179,4 +187,3 @@ exports.custom = function(data) {
     }
   }
 }
-

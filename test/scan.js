@@ -163,8 +163,8 @@ describe('scan', function() {
           'Member must satisfy enum value set: [IN, NULL, BETWEEN, LT, NOT_CONTAINS, EQ, GT, NOT_NULL, NE, LE, BEGINS_WITH, GE, CONTAINS]',
           'Value \'-1\' at \'segment\' failed to satisfy constraint: ' +
           'Member must have value greater than or equal to 0',
-          'Value \'[]\' at \'attributesToGet\' failed to satisfy constraint: ' +
-          'Member must have length greater than or equal to 1',
+          'Value \'-1\' at \'limit\' failed to satisfy constraint: ' +
+          'Member must have value greater than or equal to 1',
         ], done)
     })
 
@@ -242,14 +242,10 @@ describe('scan', function() {
 
     it('should return ValidationException for invalid values in ScanFilter', function(done) {
       async.forEach([
-        [{N: '', S: ''}, 'An AttributeValue may not contain an empty string'],
-        [{B: ''}, 'An AttributeValue may not contain a null or empty binary type.'],
         [{NULL: 'no'}, 'Null attribute value types must have the value of true'],
         [{SS: []}, 'An string set  may not be empty'],
         [{NS: []}, 'An number set  may not be empty'],
         [{BS: []}, 'Binary sets should not be empty'],
-        [{SS: ['a', '']}, 'An string set may not have a empty string as a member'],
-        [{BS: ['aaaa', '']}, 'Binary sets may not contain null or empty values'],
         [{SS: ['a', 'a']}, 'Input collection [a, a] contains duplicates.'],
         [{BS: ['Yg==', 'Yg==']}, 'Input collection [Yg==, Yg==]of type BS contains duplicates.'],
       ], function(expr, cb) {
@@ -264,6 +260,7 @@ describe('scan', function() {
 
     it('should return ValidationException for empty/invalid numbers in ScanFilter', function(done) {
       async.forEach([
+        [{S: '', N: ''}, 'The parameter cannot be converted to a numeric value'],
         [{S: 'a', N: ''}, 'The parameter cannot be converted to a numeric value'],
         [{S: 'a', N: 'b'}, 'The parameter cannot be converted to a numeric value: b'],
         [{NS: ['1', '']}, 'The parameter cannot be converted to a numeric value'],
@@ -461,16 +458,9 @@ describe('scan', function() {
 
     it('should return ValidationException for invalid values in ExclusiveStartKey', function(done) {
       async.forEach([
-        [{N: '', S: ''}, 'An AttributeValue may not contain an empty string'],
-        [{B: ''}, 'An AttributeValue may not contain a null or empty binary type.'],
         [{NULL: 'no'}, 'Null attribute value types must have the value of true'],
         [{SS: []}, 'An string set  may not be empty'],
-        [{NS: []}, 'An number set  may not be empty'],
         [{BS: []}, 'Binary sets should not be empty'],
-        [{SS: ['a', '']}, 'An string set may not have a empty string as a member'],
-        [{BS: ['aaaa', '']}, 'Binary sets may not contain null or empty values'],
-        [{SS: ['a', 'a']}, 'Input collection [a, a] contains duplicates.'],
-        [{BS: ['Yg==', 'Yg==']}, 'Input collection [Yg==, Yg==]of type BS contains duplicates.'],
       ], function(expr, cb) {
         assertValidation({
           TableName: 'abc',
@@ -484,8 +474,26 @@ describe('scan', function() {
       }, done)
     })
 
+    it('should return ValidationException for invalid values in ExclusiveStartKey with no provided message', function(done) {
+      async.forEach([
+        [{NS: []}, 'An number set  may not be empty'],
+        [{SS: ['a', 'a']}, 'Input collection [a, a] contains duplicates.'],
+        [{BS: ['Yg==', 'Yg==']}, 'Input collection [Yg==, Yg==]of type BS contains duplicates.'],
+      ], function(expr, cb) {
+        assertValidation({
+          TableName: 'abc',
+          Segment: 1,
+          FilterExpression: '',
+          ExpressionAttributeNames: {},
+          ExpressionAttributeValues: {},
+          ExclusiveStartKey: {a: expr[0]},
+        }, 'One or more parameter values were invalid: ' + expr[1], cb)
+      }, done)
+    })
+
     it('should return ValidationException for empty/invalid numbers in ExclusiveStartKey', function(done) {
       async.forEach([
+        [{S: '', N: ''}, 'The parameter cannot be converted to a numeric value'],
         [{S: 'a', N: ''}, 'The parameter cannot be converted to a numeric value'],
         [{S: 'a', N: 'b'}, 'The parameter cannot be converted to a numeric value: b'],
         [{NS: ['1', '']}, 'The parameter cannot be converted to a numeric value'],
@@ -505,7 +513,7 @@ describe('scan', function() {
           ExpressionAttributeNames: {},
           ExpressionAttributeValues: {},
           ExclusiveStartKey: {a: expr[0]},
-        }, 'The provided starting key is invalid: ' + expr[1], cb)
+        }, expr[1], cb)
       }, done)
     })
 
@@ -612,7 +620,7 @@ describe('scan', function() {
         'attribute_exists(Pictures..RearView)',
         'attribute_exists(Pi#ctures.RearView)',
         'attribute_exists(asdf[a])',
-        'a.:a < b.:b',
+        // 'a.:a < b.:b', // 500 error? com.amazon.coral.service#InternalFailure
         'a in b, c',
         'a > between',
         'a in b, c',
@@ -1249,9 +1257,9 @@ describe('scan', function() {
     })
 
     it('should scan by multiple properties', function(done) {
-      var item = {a: {S: helpers.randomString()}, b: {N: helpers.randomNumber()}, c: {N: helpers.randomNumber()}},
-          item2 = {a: {S: helpers.randomString()}, b: item.b, c: item.c},
-          item3 = {a: {S: helpers.randomString()}, b: item.b, c: {N: helpers.randomNumber()}},
+      var item = {a: {S: helpers.randomString()}, date: {N: helpers.randomNumber()}, c: {N: helpers.randomNumber()}},
+          item2 = {a: {S: helpers.randomString()}, date: item.date, c: item.c},
+          item3 = {a: {S: helpers.randomString()}, date: item.date, c: {N: helpers.randomNumber()}},
           batchReq = {RequestItems: {}}
       batchReq.RequestItems[helpers.testHashTable] = [
         {PutRequest: {Item: item}},
@@ -1263,17 +1271,18 @@ describe('scan', function() {
         res.statusCode.should.equal(200)
         async.forEach([{
           ScanFilter: {
-            b: {ComparisonOperator: 'EQ', AttributeValueList: [item.b]},
+            date: {ComparisonOperator: 'EQ', AttributeValueList: [item.date]},
             c: {ComparisonOperator: 'EQ', AttributeValueList: [item.c]},
           },
         }, {
-          FilterExpression: 'b = :b AND c = :c',
-          ExpressionAttributeValues: {':b': item.b, ':c': item.c},
+          FilterExpression: '#d = :date AND c = :c',
+          ExpressionAttributeValues: {':date': item.date, ':c': item.c},
+          ExpressionAttributeNames: {'#d': 'date'},
         }], function(scanOpts, cb) {
           scanOpts.TableName = helpers.testHashTable
           request(opts(scanOpts), function(err, res) {
             if (err) return cb(err)
-            res.statusCode.should.equal(200)
+            res.statusCode.should.equal(200, res.rawBody)
             res.body.Items.should.containEql(item)
             res.body.Items.should.containEql(item2)
             res.body.Items.should.have.length(2)
@@ -2881,6 +2890,12 @@ describe('scan', function() {
         res.statusCode.should.equal(200)
         async.forEach([{
           FilterExpression: 'size(b) = :b AND c = :c',
+          ExpressionAttributeValues: {':b': {N: '3'}, ':c': item.c},
+        }, {
+          FilterExpression: '(size(b)) = :b AND c = :c',
+          ExpressionAttributeValues: {':b': {N: '3'}, ':c': item.c},
+        }, {
+          FilterExpression: '((size(b)) = :b) AND c = :c',
           ExpressionAttributeValues: {':b': {N: '3'}, ':c': item.c},
         }], function(scanOpts, cb) {
           scanOpts.TableName = helpers.testHashTable
