@@ -9,9 +9,10 @@ var target = 'TransactWriteItems',
     assertType = helpers.assertType.bind(null, target),
     assertValidation = helpers.assertValidation.bind(null, target),
     assertTransactionCanceled = helpers.assertTransactionCanceled.bind(null, target)
-    assertNotFound = helpers.assertNotFound.bind(null, target)
 
 describe('transactWriteItem', function() {
+    // Mocha keeps all globals in the same name space (oh god)
+    const assertNotFound = helpers.assertNotFound.bind(null, target)
 
     describe('serializations', function() {
 
